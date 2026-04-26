@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gekaufte Tickets nach Ort</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H" crossorigin="anonymous">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+            crossorigin="anonymous"></script>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f5f5f5;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+            gap: 0;
+        }
+
+        .sidebar {
+            width: 250px;
+            background: white;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+            padding: 20px;
+            z-index: 1000;
+        }
+
+        .sidebar h2 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            color: #333;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+
+        .event-checkbox {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+
+        .event-checkbox input {
+            margin-right: 8px;
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
+        }
+
+        .event-checkbox label {
+            cursor: pointer;
+            flex: 1;
+            font-size: 14px;
+            color: #333;
+        }
+
+        .map-container {
+            flex: 1;
+            position: relative;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        .legend {
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
+            font-size: 12px;
+            line-height: 1.8;
+        }
+
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 5px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 1px solid #333;
+        }
+
+        .popup-content {
+            font-size: 12px;
+        }
+
+        .popup-content p {
+            margin: 5px 0;
+        }
+
+        .popup-content strong {
+            color: #007bff;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="sidebar">
+        <h2>Events</h2>
+        <div id="eventCheckboxes"></div>
+    </div>
+    <div class="map-container">
+        <div id="map"></div>
+    </div>
+</div>
+
+<script>
+    <!-- CITY_DATA_PLACEHOLDER -->
+
+    // Initialize map
+    const map = L.map('map').setView([47.5, 10.5], 6);
+
+    // Add OpenStreetMap tiles
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    // Function to determine color categories dynamically based on data
+    function getColorCategoriesFromCounts(countsInput) {
+        if (!countsInput.length) return { min: 0, q25: 10, q50: 50, q75: 100, max: 1000 };
+
+        const counts = [...countsInput].sort((a, b) => a - b);
+        const len = counts.length;
+
+        const min = counts[0];
+        const max = counts[len - 1];
+        const q25 = counts[Math.floor(len * 0.25)];
+        const q50 = counts[Math.floor(len * 0.5)];
+        const q75 = counts[Math.floor(len * 0.75)];
+
+        return { min, q25, q50, q75, max };
+    }
+
+    function getColorByCount(count, categories) {
+        if (count < categories.q25) return '#ffcccc';
+        if (count < categories.q50) return '#ff9999';
+        if (count < categories.q75) return '#ff6666';
+        return '#cc0000';
+    }
+
+    // Add legend
+    let currentCategories = { min: 0, q25: 10, q50: 50, q75: 100, max: 1000 };
+
+    const legend = L.control({ position: 'bottomright' });
+    legend.onAdd = function (map) {
+        const div = L.DomUtil.create('div', 'legend');
+        div.id = 'legend-content';
+        div.innerHTML = `
+                <div class="legend-title">Tickets pro Stadt</div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ffcccc;"></div>
+                    <span>&lt; ${currentCategories.q25}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff9999;"></div>
+                    <span>${currentCategories.q25} - ${currentCategories.q50}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff6666;"></div>
+                    <span>${currentCategories.q50} - ${currentCategories.q75}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #cc0000;"></div>
+                    <span>&gt; ${currentCategories.q75}</span>
+                </div>
+            `;
+        return div;
+    };
+    legend.addTo(map);
+
+    function updateLegend(categories) {
+        currentCategories = categories;
+        const legendContent = document.getElementById('legend-content');
+        if (!legendContent) return;
+        legendContent.innerHTML = `
+                <div class="legend-title">Tickets pro Stadt</div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ffcccc;"></div>
+                    <span>&lt; ${currentCategories.q25}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff9999;"></div>
+                    <span>${currentCategories.q25} - ${currentCategories.q50}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ff6666;"></div>
+                    <span>${currentCategories.q50} - ${currentCategories.q75}</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #cc0000;"></div>
+                    <span>&gt; ${currentCategories.q75}</span>
+                </div>
+            `;
+    }
+
+    // Helper function: get radius based on ticket count
+    function getRadiusByCount(count) {
+        return Math.max(5, Math.min(30, 5 + (count / 10)));
+    }
+
+    const markerLayer = L.layerGroup().addTo(map);
+    const activeEvents = new Set();
+
+    function getLocationKey(cityInfo) {
+        const lat = Number(cityInfo.lat).toFixed(6);
+        const lng = Number(cityInfo.lng).toFixed(6);
+        return [lat, lng, cityInfo.postcode || '', cityInfo.city || '', cityInfo.country || ''].join('|');
+    }
+
+    function buildMergedLocations() {
+        const merged = new Map();
+
+        Object.keys(cityData).forEach((eventId) => {
+            const eventData = cityData[eventId];
+            const eventName = eventData.name;
+            const eventDate = eventData.date || '';
+            const eventDisplayName = eventDate ? `${eventName} (${eventDate})` : eventName;
+
+            eventData.cities.forEach((cityInfo) => {
+                if (!cityInfo.city || cityInfo.lat === null || cityInfo.lng === null) return;
+
+                const key = getLocationKey(cityInfo);
+                if (!merged.has(key)) {
+                    merged.set(key, {
+                        postcode: cityInfo.postcode,
+                        city: cityInfo.city,
+                        country: cityInfo.country,
+                        lat: cityInfo.lat,
+                        lng: cityInfo.lng,
+                        eventCounts: {}
+                    });
+                }
+
+                const entry = merged.get(key);
+                entry.eventCounts[eventId] = {
+                    name: eventDisplayName,
+                    count: (entry.eventCounts[eventId]?.count || 0) + cityInfo.ticketCount
+                };
+            });
+        });
+
+        return merged;
+    }
+
+    const mergedLocations = buildMergedLocations();
+
+    function getVisibleMergedEntries() {
+        const visibleEntries = [];
+        mergedLocations.forEach((locationEntry) => {
+            let total = 0;
+            const breakdown = [];
+
+            Object.keys(locationEntry.eventCounts).forEach((eventId) => {
+                if (!activeEvents.has(eventId)) return;
+                const eventPart = locationEntry.eventCounts[eventId];
+                total += eventPart.count;
+                breakdown.push(eventPart);
+            });
+
+            if (total > 0) {
+                visibleEntries.push({ ...locationEntry, totalTicketCount: total, breakdown });
+            }
+        });
+
+        return visibleEntries;
+    }
+
+    function renderMergedMarkers() {
+        markerLayer.clearLayers();
+
+        const visibleEntries = getVisibleMergedEntries();
+        const categories = getColorCategoriesFromCounts(visibleEntries.map(entry => entry.totalTicketCount));
+        updateLegend(categories);
+
+        visibleEntries.forEach((entry) => {
+            const color = getColorByCount(entry.totalTicketCount, categories);
+            const radius = getRadiusByCount(entry.totalTicketCount);
+
+            const marker = L.circleMarker([entry.lat, entry.lng], {
+                radius: radius,
+                fillColor: color,
+                color: '#8B0000',
+                weight: 2,
+                opacity: 0.8,
+                fillOpacity: 0.7
+            });
+
+            const breakdownHtml = entry.breakdown
+                .sort((a, b) => b.count - a.count)
+                .map((part) => `<p style="font-size: 11px; color: #666;">${part.name}: ${part.count}</p>`)
+                .join('');
+
+            const popupContent = `
+                <div class="popup-content">
+                    <p><strong>${entry.city}</strong></p>
+                    <p>PLZ: ${entry.postcode || 'N/A'}</p>
+                    <p>Land: ${entry.country || 'N/A'}</p>
+                    <p><strong>Tickets gesamt: ${entry.totalTicketCount}</strong></p>
+                    <p style="font-size: 11px; color: #666; border-top: 1px solid #ddd; padding-top: 5px; margin-top: 5px;">
+                        Nach Event:
+                    </p>
+                    ${breakdownHtml}
+                </div>
+            `;
+
+            marker.bindPopup(popupContent);
+            markerLayer.addLayer(marker);
+        });
+    }
+
+    // Create event checkboxes and markers
+    const checkboxContainer = document.getElementById('eventCheckboxes');
+
+    Object.keys(cityData).forEach((eventId) => {
+        const eventData = cityData[eventId];
+        const eventName = eventData.name;
+        const eventDate = eventData.date || '';
+        const displayName = eventDate ? `${eventName} (${eventDate})` : eventName;
+        activeEvents.add(eventId);
+
+        // Create checkbox
+        const label = document.createElement('label');
+        label.className = 'event-checkbox';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.dataset.eventId = eventId;
+
+        const labelText = document.createElement('label');
+        labelText.textContent = displayName;
+
+        label.appendChild(checkbox);
+        label.appendChild(labelText);
+        checkboxContainer.appendChild(label);
+
+        // Add checkbox change listener
+        checkbox.addEventListener('change', (e) => {
+            const isChecked = e.target.checked;
+            if (isChecked) {
+                activeEvents.add(eventId);
+            } else {
+                activeEvents.delete(eventId);
+            }
+            renderMergedMarkers();
+        });
+    });
+
+    renderMergedMarkers();
+</script>
+</body>
+</html>
+

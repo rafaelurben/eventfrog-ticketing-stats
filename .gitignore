@@ -2,6 +2,7 @@ html/*
 organizer.json
 config/*
 !config/README.md
+!config/ch_ortsverzeichnis.csv
 
 .idea
 

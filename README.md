@@ -36,3 +36,9 @@ EventFrog Ticketing stats generator using their Organizer API.
 https://docs.api.eventfrog.net/#organizer
 
 ⇒ OpenAPI JSON/YAML download links are available at the top of the page.
+
+## Data
+
+https://data.geo.admin.ch/browser/#/collections/ch.swisstopo-vd.ortschaftenverzeichnis_plz/items/ortschaftenverzeichnis_plz
+
+⇒ ortschaftenverzeichnis_plz_4326.csv.zip

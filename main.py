@@ -6,6 +6,7 @@ Fetches event data from EventFrog API and generates interactive charts with Plot
 import json
 import os
 import re
+import sys
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,8 @@ import requests
 from dotenv import load_dotenv
 from plotly.subplots import make_subplots
 
+from swiss_coordinates import load_ch_ortsverzeichnis, resolve_city_coordinates
+
 load_dotenv()
 
 PARENT_DIR = Path(__file__).parent
@@ -23,6 +26,7 @@ CONFIG_DIR = PARENT_DIR / "config"
 TEMPLATE_DIR = PARENT_DIR / "templates"
 HTML_DIR = PARENT_DIR / "html"
 os.makedirs(HTML_DIR, exist_ok=True)
+CSV_ORTSVERZEICHNIS_PATH = CONFIG_DIR / "ch_ortsverzeichnis.csv"
 
 # Configuration
 API_BASE_URL = "https://api.eventfrog.net"
@@ -42,6 +46,13 @@ try:
 except Exception as e:
     print(f"Error reading categories.json: {e}")
     CATEGORY_CONFIG = {}
+
+try:
+    CH_ORTS_INDEX = load_ch_ortsverzeichnis(CSV_ORTSVERZEICHNIS_PATH)
+    print(f"Loaded Swiss place directory with {sum(len(v) for v in CH_ORTS_INDEX.values())} entries")
+except Exception as e:
+    print(f"Error reading ch_ortsverzeichnis.csv: {e}")
+    CH_ORTS_INDEX = {}
 
 CATEGORY_NAME_MAPPINGS = CATEGORY_CONFIG.get("mappings", {})
 CATEGORY_COLORS = CATEGORY_CONFIG.get("colors", {})
@@ -165,6 +176,15 @@ class TicketAnalyzer:
                 self.category_name_to_color[title] = color
                 print(f"Category ID {cat_id}: '{title}' -> Color: {color}")
 
+    def _lookup_city_coordinates(self, postcode: str, city: str, country: str) -> Tuple[float, float] | None:
+        """Resolve Swiss city coordinates from the local ortsverzeichnis."""
+        coords = resolve_city_coordinates(CH_ORTS_INDEX, postcode, city, country)
+        if coords:
+            return coords
+        else:
+            print(f"Could not resolve coordinates for city: {city}, postcode: {postcode}, country: {country}")
+            return None
+
     def get_category_name(self, event_id: int, category_id: int) -> str:
         """Get category name by event and category ID."""
         categories = self.categories_by_event.get(event_id, [])
@@ -271,6 +291,91 @@ class TicketAnalyzer:
                 result[event_id] = dict(sales_by_category)
             else:
                 result[event_id] = {}
+
+        return result
+
+    def analyze_tickets_by_city(self) -> Dict[int, Dict]:
+        """
+        Analyze tickets grouped by city for active sales only.
+        Returns: {event_id: {name: "Event name", date: "dd.mm.yyyy", cities: [{postcode, city, country, ticketCount, lat, lng}, ...]}}
+        """
+        result = {}
+
+        for event_id, transactions in self.transactions_by_event.items():
+            # Get event name and date
+            event_name = f"Event {event_id}"
+            event_date = ""
+            for event in self.events:
+                if event["id"] == event_id:
+                    localized = event.get("localizedInfo", [])
+                    if localized:
+                        event_name = localized[0].get("title", f"Event {event_id}")
+
+                    # Extract and format date
+                    begin_date = event.get("beginDate", "")
+                    if begin_date:
+                        try:
+                            event_date_obj = datetime.fromisoformat(begin_date.replace("Z", "+00:00"))
+                            event_date = event_date_obj.strftime("%d.%m.%Y")
+                        except:
+                            event_date = ""
+                    break
+
+            # Aggregate tickets by city
+            city_stats = defaultdict(lambda: {"postcode": None, "city": None, "country": None, "ticketCount": 0})
+
+            for transaction in transactions:
+                # Skip blocking transactions - only include active sales
+                if transaction.get("type") == "blocking":
+                    continue
+
+                # Get customer info
+                customer = transaction.get("customer")
+                if not customer:
+                    continue
+
+                city = customer.get("city")
+                postcode = customer.get("zip")
+                country = customer.get("country")
+
+                # Skip if no city info
+                if not city:
+                    continue
+
+                # Create city key (postcode_city_country)
+                city_key = (postcode, city, country)
+
+                # Count tickets
+                for ticket in transaction.get("tickets", []):
+                    if ticket.get("cancelled", False):
+                        continue
+                    city_stats[city_key]["ticketCount"] += 1
+                    city_stats[city_key]["postcode"] = postcode
+                    city_stats[city_key]["city"] = city
+                    city_stats[city_key]["country"] = country
+
+            # Convert to list format and resolve coordinates from the Swiss ortsverzeichnis
+            cities_list = []
+            for stats in city_stats.values():
+                coordinates = self._lookup_city_coordinates(stats["postcode"], stats["city"], stats["country"])
+                city_obj = {
+                    "postcode": stats["postcode"],
+                    "city": stats["city"],
+                    "country": stats["country"],
+                    "ticketCount": stats["ticketCount"],
+                    "lat": coordinates[0] if coordinates else None,
+                    "lng": coordinates[1] if coordinates else None,
+                }
+
+                # Only include cities with valid coordinates
+                if city_obj["lat"] is not None and city_obj["lng"] is not None:
+                    cities_list.append(city_obj)
+
+            result[event_id] = {
+                "name": event_name,
+                "date": event_date,
+                "cities": cities_list
+            }
 
         return result
 
@@ -503,26 +608,55 @@ class ChartGenerator:
         fig.write_html(output_path)
         print(f"Saved sales timeline charts to {output_path}")
 
+    def generate_city_map_chart(self, output_file: str = "city_map.html"):
+        """Generate interactive city map with event checkboxes and ticker count visualization."""
+        city_data = self.analyzer.analyze_tickets_by_city()
 
-def create_index_file():
-    source_index_path = TEMPLATE_DIR / "index.html"
-    target_index_path = HTML_DIR / "index.html"
+        # Filter out events with no city data
+        city_data = {event_id: data for event_id, data in city_data.items() if data["cities"]}
 
-    html = source_index_path.read_text(encoding="utf-8")
+        if not city_data:
+            print("No city data available for map")
+            sys.exit(1)
 
-    now_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
+        # Read template
+        template_path = TEMPLATE_DIR / "city_map.html"
+        if not template_path.exists():
+            print(f"Template not found: {template_path}")
+            return
 
-    pattern = re.compile(
-        r'(<span\s+id="last-update">)(.*?)(</span>)',
-        flags=re.IGNORECASE | re.DOTALL,
-    )
+        template_content = template_path.read_text(encoding="utf-8")
 
-    updated_html, count = pattern.subn(rf"\1{now_str}\3", html, count=1)
-    if count == 0:
-        raise RuntimeError('No <span id="last-update">...</span> found in index.html')
+        # Convert city data to JSON string
+        city_data_json = json.dumps(city_data)
 
-    target_index_path.write_text(updated_html, encoding="utf-8")
-    print(f"Updated {target_index_path.name}: {now_str}")
+        # Replace placeholder with actual data
+        updated_html = template_content.replace("<!-- CITY_DATA_PLACEHOLDER -->", f"const cityData = {city_data_json};")
+
+        # Write output file
+        output_path = HTML_DIR / output_file
+        output_path.write_text(updated_html, encoding="utf-8")
+        print(f"Saved city map to {output_path}")
+
+    def generate_index_file(self):
+        source_index_path = TEMPLATE_DIR / "index.html"
+        target_index_path = HTML_DIR / "index.html"
+
+        html = source_index_path.read_text(encoding="utf-8")
+
+        now_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
+
+        pattern = re.compile(
+            r'(<span\s+id="last-update">)(.*?)(</span>)',
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        updated_html, count = pattern.subn(rf"\1{now_str}\3", html, count=1)
+        if count == 0:
+            raise RuntimeError('No <span id="last-update">...</span> found in index.html')
+
+        target_index_path.write_text(updated_html, encoding="utf-8")
+        print(f"Updated {target_index_path.name}: {now_str}")
 
 
 def main():
@@ -541,13 +675,14 @@ def main():
     chart_gen = ChartGenerator(analyzer)
     chart_gen.generate_horizontal_stacked_bar("ticket_summary.html")
     chart_gen.generate_sales_over_time_charts("sales_timeline.html")
+    chart_gen.generate_city_map_chart("city_map.html")
+    chart_gen.generate_index_file()
 
     print("\nDone! Generated files:")
     print("  - html/index.html")
     print("  - html/ticket_summary.html")
     print("  - html/sales_timeline.html")
-
-    create_index_file()
+    print("  - html/city_map.html")
 
 
 if __name__ == "__main__":
