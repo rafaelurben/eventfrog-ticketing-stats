@@ -1,4 +1,4 @@
 requests==2.34.2
 pandas==3.0.6
-plotly==6.9.0
+plotly==7.1.0
 python-dotenv==1.2.4
